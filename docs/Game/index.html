@@ -1,0 +1,2767 @@
+<html>
+<head>
+<meta charset="utf-8">
+</head>
+<body>
+<script type="text/javascript">
+ 
+// edit these to change the link shown when you win
+var winLinkText = "Continue";
+var winLinkUrl = "https://example.com";
+ 
+// main
+function main()
+{
+    var universe = new DemoData().universe();
+ 
+    var soundHelper = new SoundHelper
+    (
+        "../Media/Sounds/",
+        [ "turnstart", "damage", "scroll", "select", "death", "plrdeath", "win", "lose" ],
+        "music"
+    );
+ 
+    Globals.Instance.initialize
+    (
+        100, // millisecondsPerTimerTick
+        new Display
+        (
+            new Coords(300, 225),
+            8, // fontHeightInPixels
+            "LightGray", // colorFore
+            "Black" // colorBack
+        ),
+        universe,
+        soundHelper
+    );
+}
+ 
+// extensions
+ 
+function ArrayExtensions()
+{
+    // extension class
+}
+{
+    Array.prototype.addLookups = function(keyName)
+    {
+        for (var i = 0; i < this.length; i++)
+        {
+            var item = this[i];
+            this[item[keyName]] = item;
+        }
+        return this;
+    }
+}
+ 
+// classes
+ 
+function Action()
+{
+    this.status = ActionStatus.Instances.None;
+    this.parameters = [];
+    this.menuLocked = null;
+}
+{
+    // instance methods
+ 
+    Action.prototype.defn = function(agent)
+    {
+        var returnValue = agent.defn().actionDefns[this.defnName];
+ 
+        if (returnValue == null)
+        {
+            returnValue = Globals.Instance.universe.actionDefns[this.defnName];
+        }
+ 
+        return returnValue;
+    }
+ 
+    Action.prototype.target = function()
+    {
+        return this.parameters["Target"];
+    }
+ 
+    Action.prototype.target_Set = function(valueToSet)
+    {
+        this.parameters["Target"] = valueToSet;
+    }
+ 
+    Action.prototype.updateEncounterAndAgentForTimerTick = function(encounter, agent)
+    {
+        var display = Globals.Instance.display;
+ 
+        if (this.status == ActionStatus.Instances.None)
+        {
+            var intelligence = agent.party.intelligence;
+            if (intelligence instanceof IntelligenceMachine)
+            {
+                intelligence.decideActionDefn(this, agent);
+                return;
+            }
+ 
+            this.status = ActionStatus.Instances.AwaitingActionDefn;
+ 
+            var actionDefns = agent.defn().actionDefns;
+ 
+            var updateEncounter = function()
+            {
+                var encounter = Globals.Instance.universe.encounter;
+                var agent = encounter.agentCurrent;
+                var action = agent.action;
+                action.defnName = this.text; // hack
+                var actionDefn = action.defn(agent);
+                if (actionDefn.requiresTarget == true)
+                {
+                    actionStatusNext = ActionStatus.Instances.AwaitingTarget;
+                }
+                else
+                {
+                    actionStatusNext = ActionStatus.Instances.Complete;
+                }
+                action.status = actionStatusNext;
+            }
+ 
+            var panes = encounter.defn().panes;
+ 
+            var menuForActionDefns = new Menu
+            (
+                "Actions",
+                panes["Menu_Player"].pos, // pos
+                new Coords(0, 8), // spacing
+                null, // updateEncounter
+                null, // menuable
+                Menu.menuablesToMenus
+                (
+                    actionDefns,
+                    [ "name" ], // bindingPathsForMenuText
+                    updateEncounter
+                ),
+                0 // indexOfChildSelected
+            );
+ 
+            encounter.entitiesToSpawn.push(menuForActionDefns);
+        }
+        else if (this.status == ActionStatus.Instances.AwaitingActionDefn)
+        {
+            // do nothing   
+        }
+        else if (this.status == ActionStatus.Instances.AwaitingTarget)
+        {
+            var intelligence = encounter.partyCurrent().intelligence;
+            intelligence.decideAction(this);
+        }
+        else if (this.status == ActionStatus.Instances.Running)
+        {
+            var actionDefn = this.defn(agent);
+            actionDefn.perform(encounter, agent, this);
+        }
+        else if (this.status == ActionStatus.Instances.Complete)
+        {
+            if (this.menuLocked != null)
+            {
+                encounter.entitiesToRemove.push(this.menuLocked);
+            }
+            agent.action = null;
+            if (agent.motivatedTurns > 0)
+            {
+                agent.motivatedTurns--;
+            }
+            agent.turnsTakenThisRound++;
+            if (agent.turnsTakenThisRound >= agent.defn().damageRanges.length)
+            {
+                agent.hasMovedThisTurn = true;
+                agent.turnsTakenThisRound = 0;
+            }
+            encounter.agentCurrentAdvance();
+        }
+    }
+}
+ 
+function ActionDefn
+(
+    name,
+    requiresTarget, 
+    perform,
+    toMenu,
+    targetMode
+)
+{
+    this.name = name;
+    this.requiresTarget = requiresTarget;
+    this.perform = perform;
+    this.toMenu = toMenu;
+    this.targetMode = targetMode; // null (any), "AllyOther" or "AllyDead"
+}
+ 
+function ActionStatus(name)
+{
+    this.name = name;
+}
+{
+    ActionStatus.Instances = new ActionStatus_Instances();
+     
+    function ActionStatus_Instances()
+    {
+        this.None       = new ActionStatus("None");
+        this.AwaitingActionDefn = new ActionStatus("AwaitingActionDefn");
+        this.AwaitingTarget     = new ActionStatus("AwaitingTarget");
+        this.Running        = new ActionStatus("Running");
+        this.Complete       = new ActionStatus("Complete"); 
+    }
+}
+ 
+function Agent(name, defnName, pos, spriteName)
+{
+    this.name = name;
+    this.defnName = defnName;
+    this.pos = pos;
+    this.spriteName = spriteName;
+ 
+    this.action = null;
+    this.effects = [];
+ 
+    this.hasMovedThisTurn = false;
+    this.blinkTicksRemaining = 0;
+    this.ticksSinceDeath = 0;
+    this.ticksSinceSpawn = Agent.ticksToFade; // new waves set this to 0 to fade in
+    this.turnsTakenThisRound = 0;
+    this.guarding = null; // ally this agent is currently guarding
+    this.motivatedTurns = 0; // turns of doubled attack left
+}
+{
+    Agent.ticksToBlink = 8;
+    Agent.ticksToFade = 10;
+ 
+    Agent.prototype.defn = function()
+    {
+        return Globals.Instance.universe.agentDefns[this.defnName];
+    }
+ 
+    Agent.critChanceEnemy = 0.8;
+    Agent.critChancePlayer = 0.25;
+    Agent.critMultiplier = 1.5;
+    Agent.guardShare = 0.25; // each of guarder and guarded takes this share of a hit
+
+    Agent.prototype.guardian = function()
+    {
+        var agents = this.party.agents;
+        for (var i = 0; i < agents.length; i++)
+        {
+            var other = agents[i];
+            if (other != this && other.isAlive() && other.guarding == this)
+            {
+                return other;
+            }
+        }
+        return null;
+    }
+
+    Agent.prototype.damageTarget = function(target, baseDamage)
+    {
+        if (this.motivatedTurns > 0)
+        {
+            baseDamage *= 2; // motivated
+        }
+        var isEnemy = (this.party.intelligence instanceof IntelligenceMachine);
+        var critChance = (isEnemy ? Agent.critChanceEnemy : Agent.critChancePlayer);
+        var isCrit = (Math.random() < critChance);
+        var amount = baseDamage;
+        if (isCrit)
+        {
+            amount = Math.ceil(baseDamage * Agent.critMultiplier);
+        }
+        target.damage(amount, isCrit);
+    }
+
+    Agent.prototype.damage = function(amount, isCrit)
+    {
+        var guardian = this.guardian();
+        if (guardian != null)
+        {
+            // guarded: the hit is split, and each takes a quarter (rounded up)
+            var share = Math.ceil(amount * Agent.guardShare);
+            this.damageApply(share, isCrit);
+            guardian.damageApply(share, isCrit);
+        }
+        else
+        {
+            this.damageApply(amount, isCrit);
+        }
+    }
+
+    Agent.prototype.damageApply = function(amount, isCrit)
+    {
+        var wasAlive = this.isAlive();
+        this.integrity = Math.max(0, this.integrity - amount);
+        this.blinkTicksRemaining = Agent.ticksToBlink;
+        Globals.Instance.soundHelper.play("damage");
+        if (wasAlive && this.isAlive() == false)
+        {
+            this.motivatedTurns = 0;
+            var diedOnPlayerSide = (this.party.intelligence instanceof IntelligenceHuman);
+            Globals.Instance.soundHelper.play(diedOnPlayerSide ? "plrdeath" : "death");
+        }
+
+        var isPlayerSide = (this.party.intelligence instanceof IntelligenceHuman);
+        var color = (isCrit ? "Gold" : (isPlayerSide ? "Tomato" : "White"));
+        this.numberSpawn("" + amount + (isCrit ? "!" : ""), color, isCrit);
+    }
+
+    Agent.prototype.heal = function(amount)
+    {
+        var before = this.integrity;
+        this.integrity = NumberHelper.trimValueToMinAndMax
+        (
+            this.integrity + amount,
+            0, // min
+            this.defn().integrityMax // max
+        );
+        this.numberSpawn("+" + (this.integrity - before), "LightGreen", false);
+    }
+
+    Agent.prototype.numberSpawn = function(text, color, isCrit)
+    {
+        var size = this.defn().sizeInPixels;
+        var pos = new Coords(this.pos.x + size.x / 2, this.pos.y + size.y / 3);
+        var encounter = Globals.Instance.universe.encounter;
+        encounter.entitiesToSpawn.push(new DamageNumber(text, pos, color, isCrit));
+    }
+ 
+    Agent.prototype.hasFadedOut = function()
+    {
+        return (this.isAlive() == false && this.ticksSinceDeath >= Agent.ticksToFade);
+    }
+ 
+    Agent.prototype.isAlive = function()
+    {
+        // integrity is unset until the encounter starts
+        return !(this.integrity <= 0);
+    }
+ 
+    Agent.prototype.initializeForEncounter = function(encounter)
+    {
+        var defn = this.defn();
+        this.integrity = defn.integrityMax;
+        this.energy = defn.energyMax;
+        this.motivatedTurns = 0;
+        this.guarding = null;
+        this.hasMovedThisTurn = false;
+    }
+ 
+    Agent.prototype.updateEncounterForTimerTick = function(encounter)
+    {
+        if (this.blinkTicksRemaining > 0)
+        {
+            this.blinkTicksRemaining--;
+        }
+ 
+        if (this.isAlive() == false)
+        {
+            this.ticksSinceDeath++;
+        }
+ 
+        if (this.ticksSinceSpawn < Agent.ticksToFade)
+        {
+            this.ticksSinceSpawn++;
+        }
+ 
+        if (encounter.agentCurrent == this)
+        {
+            if (this.action == null)
+            {
+                this.action = new Action();
+                this.guarding = null; // a guard lasts until the guarder's next turn
+            }
+     
+            this.action.updateEncounterAndAgentForTimerTick
+            (
+                encounter,
+                this
+            );
+        }
+    }
+ 
+    // menuable
+ 
+    Agent.prototype.toMenu = function()
+    {
+        var universe = Globals.Instance.universe;
+        var encounter = universe.encounter;
+        var panes = encounter.defn().panes;
+        var agentDefn = this.defn();
+ 
+        var textForAgent;
+        if (this.name == null) // hack
+        {
+            textForAgent = agentDefn.name;
+        }
+        else
+        {
+            textForAgent = this.name;
+        }
+ 
+        textForAgent += 
+            " ("
+            + "H:" + this.integrity + "/" + agentDefn.integrityMax;
+ 
+        if (agentDefn.energyMax > 0)
+        {
+            textForAgent += 
+                " E:" + this.energy + "/" + agentDefn.energyMax
+        }
+ 
+        textForAgent += ")";
+ 
+        var returnMenu = new Menu
+        (
+            textForAgent,
+            panes["Menu_Player"].pos, // pos
+            new Coords(0, 8), // spacing
+            this, // menuable
+            null, // updateEncounter
+            null, // children
+            0 // indexOfChildSelected
+        );
+ 
+        return returnMenu;
+    }
+ 
+    // drawable
+ 
+    Agent.prototype.drawToDisplay = function(display)
+    {
+        var agentDefn = this.defn();
+        var size = agentDefn.sizeInPixels;
+ 
+        var alpha = 1;
+        if (this.isAlive() == false)
+        {
+            alpha = 1 - this.ticksSinceDeath / Agent.ticksToFade;
+            if (alpha <= 0)
+            {
+                return;
+            }
+        }
+ 
+        alpha = Math.min(alpha, this.ticksSinceSpawn / Agent.ticksToFade);
+ 
+        var isBlinkedOut = (this.blinkTicksRemaining % 2 == 1);
+        if (isBlinkedOut == false)
+        {
+            var image = Globals.Instance.universe.imageLibrary.images[this.spriteName];
+            display.alphaSet(alpha);
+            display.drawImageOrText(image, this.pos, size);
+            if (this.isAlive())
+            {
+                if (this.motivatedTurns > 0)
+                {
+                    display.drawText("ATK x2 (" + this.motivatedTurns + ")", new Coords(this.pos.x, this.pos.y), "Orange", "Black");
+                }
+                var guardTag = null;
+                if (this.guarding != null && this.guarding.isAlive())
+                {
+                    guardTag = "GUARD";
+                }
+                else if (this.guardian() != null)
+                {
+                    guardTag = "GUARDED";
+                }
+                if (guardTag != null)
+                {
+                    display.drawText(guardTag, new Coords(this.pos.x, this.pos.y + size.y - 9), "Cyan", "Black");
+                }
+            }
+            display.alphaSet(1);
+        }
+ 
+    }
+
+    // drawn in a separate pass, after every sprite, so no sprite can cover an arrow
+    Agent.prototype.drawIndicatorsToDisplay = function(display)
+    {
+        var encounter = Globals.Instance.universe.encounter;
+        if (this.isAlive() && encounter.agentCurrent == this)
+        {
+            this.drawIndicatorAbove(display, display.colorFore);
+ 
+            var action = this.action;
+            if (action != null)
+            {
+                var actionTarget = action.target();
+ 
+                if (actionTarget instanceof Agent && (actionTarget.isAlive() || action.defnName == "Resurrect"))
+                {
+                    actionTarget.drawIndicatorAbove(display, "Yellow");
+                }
+            }
+        }
+    }
+ 
+    Agent.prototype.drawIndicatorAbove = function(display, color)
+    {
+        var size = this.defn().sizeInPixels;
+        var indicatorSize = new Coords(6, 5);
+        var indicatorPos = new Coords
+        (
+            this.pos.x + (size.x - indicatorSize.x) / 2,
+            this.pos.y - indicatorSize.y - 2
+        );
+ 
+        display.drawArrow(indicatorPos, indicatorSize, color, "down");
+    }
+ 
+}
+ 
+function AgentDefn
+(
+    name, 
+    sizeInPixels, 
+    integrityMax,
+    energyMax,
+    initiativeRange,
+    damageRanges, // one per turn taken in a round
+    actionDefns,
+    spellDefns
+)
+{
+    this.name = name;
+    this.sizeInPixels = sizeInPixels;
+    this.integrityMax = integrityMax;
+    this.energyMax = energyMax;
+    this.initiativeRange = initiativeRange;
+    this.damageRanges = damageRanges;
+    this.actionDefns = actionDefns;
+    this.spellDefns = spellDefns;
+     
+    this.actionDefns.addLookups("name");
+ 
+    if (this.spellDefns != null)
+    {
+        this.spellDefns.addLookups("name");
+    }
+}
+ 
+function Coords(x, y)
+{
+    this.x = x;
+    this.y = y;
+}
+{
+    // instances
+ 
+    Coords.Instances = new Coords_Instances();
+ 
+    function Coords_Instances()
+    {
+        this.Zeroes = new Coords(0, 0, 0);
+    }
+ 
+    // methods
+ 
+    Coords.prototype.add = function(other)
+    {
+        this.x += other.x;
+        this.y += other.y;
+        return this;
+    }
+ 
+    Coords.prototype.clone = function()
+    {
+        return new Coords(this.x, this.y);
+    }
+ 
+    Coords.prototype.divideScalar = function(scalar)
+    {
+        this.x /= scalar;
+        this.y /= scalar;
+        return this;
+    }
+ 
+    Coords.prototype.magnitude = function()
+    {
+        return Math.sqrt(this.x * this.x + this.y * this.y);
+    }
+ 
+    Coords.prototype.multiply = function(other)
+    {
+        this.x *= other.x;
+        this.y *= other.y;
+        return this;
+    }
+ 
+    Coords.prototype.multiplyScalar = function(scalar)
+    {
+        this.x *= scalar;
+        this.y *= scalar;
+        return this;
+    }
+ 
+    Coords.prototype.overwriteWith = function(other)
+    {
+        this.x = other.x;
+        this.y = other.y;
+        return this;
+    }
+ 
+    Coords.prototype.subtract = function(other)
+    {
+        this.x -= other.x;
+        this.y -= other.y;
+        return this;
+    }
+}
+ 
+function DamageNumber(text, pos, color, isCrit)
+{
+    this.text = text;
+    this.pos = pos.clone();
+    this.color = color;
+    this.isCrit = isCrit;
+
+    this.groundY = this.pos.y + 12;
+    this.velocity = new Coords
+    (
+        (Math.random() - 0.5) * 2,
+        (isCrit ? -8 : -6.5)
+    );
+    this.ticksSinceSpawn = 0;
+}
+{
+    DamageNumber.gravity = 1.3;
+    DamageNumber.ticksToLive = 24;
+    DamageNumber.ticksToFade = 8;
+
+    DamageNumber.prototype.updateEncounterForTimerTick = function(encounter)
+    {
+        // pops up, falls under gravity, and bounces once or twice off its "ground"
+        this.velocity.y += DamageNumber.gravity;
+        this.pos.add(this.velocity);
+
+        if (this.pos.y > this.groundY)
+        {
+            this.pos.y = this.groundY;
+            this.velocity.y = -this.velocity.y * 0.45;
+        }
+
+        this.ticksSinceSpawn++;
+        if (this.ticksSinceSpawn >= DamageNumber.ticksToLive)
+        {
+            encounter.entitiesToRemove.push(this);
+        }
+    }
+
+    DamageNumber.prototype.drawToDisplay = function(display)
+    {
+        var ticksToFadeStart = DamageNumber.ticksToLive - DamageNumber.ticksToFade;
+        var alpha = 1;
+        if (this.ticksSinceSpawn > ticksToFadeStart)
+        {
+            alpha = 1 - (this.ticksSinceSpawn - ticksToFadeStart) / DamageNumber.ticksToFade;
+        }
+
+        var graphics = display.graphics;
+        graphics.save();
+        graphics.globalAlpha = Math.max(0, alpha);
+        graphics.font = "bold " + (this.isCrit ? 14 : 10) + "px sans-serif";
+        graphics.textAlign = "center";
+        graphics.textBaseline = "middle";
+        graphics.lineWidth = 2;
+        graphics.strokeStyle = "Black";
+        graphics.strokeText(this.text, this.pos.x, this.pos.y);
+        graphics.fillStyle = this.color;
+        graphics.fillText(this.text, this.pos.x, this.pos.y);
+        graphics.restore();
+    }
+}
+ 
+function Display(sizeInPixels, fontHeightInPixels, colorFore, colorBack)
+{
+    this.sizeInPixels = sizeInPixels;
+    this.fontHeightInPixels = fontHeightInPixels;
+    this.colorFore = colorFore;
+    this.colorBack = colorBack;
+}
+{
+    Display.prototype.clear = function()
+    {
+        this.drawRectangle
+        (
+            Coords.Instances.Zeroes, this.sizeInPixels,
+            this.colorBack, this.colorFore
+        );
+    }
+ 
+    Display.prototype.alphaSet = function(alpha)
+    {
+        this.graphics.globalAlpha = alpha;
+    }
+ 
+    Display.prototype.drawArrow = function(pos, size, color, direction)
+    {
+        var graphics = this.graphics;
+        graphics.fillStyle = color;
+        graphics.beginPath();
+ 
+        if (direction == "down")
+        {
+            graphics.moveTo(pos.x, pos.y);
+            graphics.lineTo(pos.x + size.x, pos.y);
+            graphics.lineTo(pos.x + size.x / 2, pos.y + size.y);
+        }
+        else // right
+        {
+            graphics.moveTo(pos.x, pos.y);
+            graphics.lineTo(pos.x + size.x, pos.y + size.y / 2);
+            graphics.lineTo(pos.x, pos.y + size.y);
+        }
+ 
+        graphics.closePath();
+        graphics.fill();
+    }
+ 
+    Display.prototype.drawImage = function(systemImage, pos, size)
+    {
+        this.graphics.drawImage
+        (
+            systemImage,
+            pos.x, pos.y,
+            size.x, size.y
+        );
+    }
+ 
+    Display.prototype.drawImageCovering = function(systemImage, pos, size)
+    {
+        // fill the box, cropping the image's edges rather than stretching it
+        var scale = Math.max
+        (
+            size.x / systemImage.naturalWidth,
+            size.y / systemImage.naturalHeight
+        );
+        var sourceSize = new Coords(size.x / scale, size.y / scale);
+        var sourcePos = new Coords
+        (
+            (systemImage.naturalWidth - sourceSize.x) / 2,
+            (systemImage.naturalHeight - sourceSize.y) / 2
+        );
+ 
+        var graphics = this.graphics;
+        graphics.save();
+        graphics.imageSmoothingEnabled = true;
+        graphics.drawImage
+        (
+            systemImage,
+            sourcePos.x, sourcePos.y, sourceSize.x, sourceSize.y,
+            pos.x, pos.y, size.x, size.y
+        );
+        graphics.restore();
+    }
+ 
+    Display.prototype.drawImageOrText = function(image, pos, size)
+    {
+        var graphics = this.graphics;
+ 
+        if (image.isLoaded())
+        {
+            // fit inside the box, keeping the image's proportions
+            var systemImage = image.systemImage;
+            var scale = Math.min
+            (
+                size.x / systemImage.naturalWidth,
+                size.y / systemImage.naturalHeight
+            );
+            var drawSize = new Coords
+            (
+                systemImage.naturalWidth * scale,
+                systemImage.naturalHeight * scale
+            );
+            var drawPos = new Coords
+            (
+                pos.x + (size.x - drawSize.x) / 2,
+                pos.y + (size.y - drawSize.y) / 2
+            );
+ 
+            this.drawImage(systemImage, drawPos, drawSize);
+        }
+        else
+        {
+            // placeholder, e.g. an emoji
+            graphics.save();
+            graphics.font = "" + Math.floor(size.y * 0.85) + "px sans-serif";
+            graphics.textAlign = "center";
+            graphics.textBaseline = "middle";
+            graphics.fillText
+            (
+                image.fallbackText,
+                pos.x + size.x / 2,
+                pos.y + size.y / 2
+            );
+            graphics.restore();
+        }
+    }
+ 
+    Display.prototype.drawRectangle = function(pos, size, colorFill, colorBorder)
+    {
+        if (colorFill != null)
+        {
+            this.graphics.fillStyle = colorFill;
+            this.graphics.fillRect
+            (
+                pos.x, pos.y, size.x, size.y
+            );
+        }
+ 
+        if (colorBorder != null)
+        {
+            this.graphics.strokeStyle = colorBorder;
+            this.graphics.strokeRect
+            (
+                pos.x, pos.y, size.x, size.y
+            );
+        }
+    }
+ 
+    Display.prototype.drawText = function(textToDraw, pos, colorFill, colorBorder)
+    {
+        var textToDrawAsLines = textToDraw.split("\n");
+ 
+        if (colorFill == null)
+        {
+            colorFill = this.colorFore;
+        }
+        this.graphics.fillStyle = colorFill;
+ 
+        if (colorBorder != null)
+        {
+            this.graphics.strokeStyle = colorBorder;    
+        }
+ 
+        for (var i = 0; i < textToDrawAsLines.length; i++)
+        {
+            var textLine = textToDrawAsLines[i];
+ 
+            if (colorBorder != null)
+            {
+                this.graphics.strokeText
+                (
+                    textLine,
+                    pos.x + 2, // hack
+                    pos.y + this.fontHeightInPixels * (i + 1)           
+                );
+            }
+ 
+            this.graphics.fillText
+            (
+                textLine,
+                pos.x + 2, // hack
+                pos.y + this.fontHeightInPixels * (i + 1)
+            );
+        }
+    }
+ 
+    Display.prototype.dispose = function()
+    {
+        window.removeEventListener("resize", this.handlerResize);
+        if (this.canvas != null && this.canvas.parentNode != null)
+        {
+            this.canvas.parentNode.removeChild(this.canvas);
+        }
+    }
+
+    Display.prototype.initialize = function()
+    {
+        var canvas = document.createElement("canvas");
+        canvas.width = this.sizeInPixels.x;
+        canvas.height = this.sizeInPixels.y;
+        this.canvas = canvas;
+        this.graphics = canvas.getContext("2d");
+        this.graphics.font = "" + this.fontHeightInPixels + "px sans-serif";
+ 
+        // scale to fit the window, centered
+        var body = document.body;
+        body.style.margin = "0";
+        body.style.overflow = "hidden";
+        body.style.background = this.colorBack;
+        body.style.display = "flex";
+        body.style.alignItems = "center";
+        body.style.justifyContent = "center";
+        body.style.width = "100vw";
+        body.style.height = "100vh";
+ 
+        var display = this;
+        var resizeCanvasToWindow = function()
+        {
+            var scale = Math.min
+            (
+                window.innerWidth / display.sizeInPixels.x,
+                window.innerHeight / display.sizeInPixels.y
+            );
+            var cssWidth = Math.floor(display.sizeInPixels.x * scale);
+            var cssHeight = Math.floor(display.sizeInPixels.y * scale);
+            canvas.style.width = cssWidth + "px";
+            canvas.style.height = cssHeight + "px";
+ 
+            // match the canvas resolution to the screen so drawing stays sharp
+            var pixelRatio = window.devicePixelRatio || 1;
+            canvas.width = Math.round(cssWidth * pixelRatio);
+            canvas.height = Math.round(cssHeight * pixelRatio);
+ 
+            // resizing resets the context; game units stay at sizeInPixels
+            var graphics = display.graphics;
+            graphics.setTransform
+            (
+                canvas.width / display.sizeInPixels.x, 0,
+                0, canvas.height / display.sizeInPixels.y,
+                0, 0
+            );
+            graphics.font = "" + display.fontHeightInPixels + "px sans-serif";
+            graphics.imageSmoothingEnabled = false;
+        }
+        resizeCanvasToWindow();
+        this.handlerResize = resizeCanvasToWindow;
+        window.addEventListener("resize", resizeCanvasToWindow);
+ 
+        // f toggles fullscreen (installed only once, even across retries)
+        if (Display.fullscreenKeyInstalled != true)
+        {
+        Display.fullscreenKeyInstalled = true;
+        window.addEventListener
+        (
+            "keydown",
+            function(e)
+            {
+                if (e.key == "f" || e.key == "F")
+                {
+                    if (document.fullscreenElement)
+                    {
+                        document.exitFullscreen();
+                    }
+                    else
+                    {
+                        document.documentElement.requestFullscreen();
+                    }
+                }
+            }
+        );
+ 
+        }
+
+        body.appendChild(canvas);
+    }
+}
+ 
+function Effect(defnName)
+{
+    this.defnName = defnName;
+    this.turnApplied = turnApplied;
+}
+{
+    Effect.prototype.defn = function()
+    {
+        return Globals.Instance.universe.effectDefns[this.defnName];
+    }
+}
+ 
+function EffectDefn(name, apply)
+{
+    this.name = name;
+    this.apply = apply;
+}
+ 
+function Empty(pos)
+{
+    this.pos = pos;
+}
+ 
+function Encounter(defnName, parties, partiesNext)
+{
+    this.defnName = defnName;
+    this.parties = parties;
+    this.partiesNext = partiesNext; // enemy parties that arrive after each win
+ 
+    this.entities = [];
+    this.entitiesToSpawn = [];
+    this.entitiesToRemove = [];
+ 
+    this.entitiesToSpawn = this.entitiesToSpawn.concat(this.parties);
+ 
+    this.agentCurrent = null;
+}
+{
+    Encounter.prototype.agentCurrentAdvance = function()
+    {
+        if (this.isOver())
+        {
+            this.agentCurrent = null;
+            return;
+        }
+ 
+        var agentNext = this.agentNextToMove();
+ 
+        if (agentNext == null)
+        {
+            // everyone has gone; start a new round
+            for (var i = 0; i < this.agentsAll.length; i++)
+            {
+                this.agentsAll[i].hasMovedThisTurn = false;
+            }
+            agentNext = this.agentNextToMove();
+        }
+ 
+        this.agentCurrent = agentNext;
+ 
+        if (agentNext.party.intelligence instanceof IntelligenceHuman)
+        {
+            Globals.Instance.soundHelper.play("turnstart");
+        }
+    }
+ 
+    Encounter.prototype.agentNextToMove = function()
+    {
+        for (var i = 0; i < this.agentsAll.length; i++)
+        {
+            var agent = this.agentsAll[i];
+            if (agent.isAlive() && agent.hasMovedThisTurn == false)
+            {
+                return agent;
+            }
+        }
+ 
+        return null;
+    }
+ 
+    Encounter.prototype.defn = function()
+    {
+        return Globals.Instance.universe.encounterDefns[this.defnName];
+    }
+ 
+    Encounter.prototype.initialize = function()
+    {
+        this.agentsAll = [];
+ 
+        for (var p = 0; p < this.parties.length; p++)
+        {
+            var party = this.parties[p];
+            var partyAgents = party.agents;
+ 
+            this.agentsAll = this.agentsAll.concat(partyAgents);
+        }
+ 
+        this.agentCurrentAdvance();
+    }
+ 
+    Encounter.prototype.isOver = function()
+    {
+        for (var p = 0; p < this.parties.length; p++)
+        {
+            if (this.parties[p].agentsAlive().length == 0)
+            {
+                return true;
+            }
+        }
+ 
+        return false;
+    }
+ 
+    Encounter.prototype.partyCurrent = function()
+    {
+        return (this.agentCurrent.party);
+    }
+ 
+    Encounter.prototype.updateForTimerTick = function()
+    {
+        for (var i = 0; i < this.entitiesToSpawn.length; i++)
+        {
+            var entity = this.entitiesToSpawn[i];
+            if (entity.initializeForEncounter != null)
+            {
+                entity.initializeForEncounter(this);
+            }
+            this.entities.push(entity);
+        }
+ 
+        this.entitiesToSpawn.length = 0;
+ 
+        for (var i = 0; i < this.entities.length; i++)
+        {
+            var entity = this.entities[i];
+            entity.updateEncounterForTimerTick(this);
+        }
+ 
+        for (var i = 0; i < this.entitiesToRemove.length; i++)
+        {
+            var entity = this.entitiesToRemove[i];
+            var indexOfEntity = this.entities.indexOf(entity);
+            if (indexOfEntity >= 0)
+            {
+                this.entities.splice(indexOfEntity, 1);
+            }
+        }
+ 
+        this.entitiesToRemove.length = 0;
+ 
+        this.updateForTimerTick_WinOrLose();
+ 
+        this.drawToDisplay(Globals.Instance.display);
+    }
+ 
+    Encounter.prototype.partyEnemyReplace = function()
+    {
+        // start the options box fresh: drop leftover menus and unfinished actions
+        this.entities = this.entities.filter(function(e) { return (e instanceof Menu) == false; });
+        this.entitiesToSpawn = this.entitiesToSpawn.filter(function(e) { return (e instanceof Menu) == false; });
+        var playerAgents = this.parties[0].agents;
+        for (var i = 0; i < playerAgents.length; i++)
+        {
+            var playerAgent = playerAgents[i];
+            playerAgent.action = null;
+            playerAgent.guarding = null;
+            playerAgent.turnsTakenThisRound = 0;
+        }
+ 
+        var partyOld = this.parties[1];
+        this.entitiesToRemove.push(partyOld);
+        this.entitiesToRemove = this.entitiesToRemove.concat(partyOld.agents);
+ 
+        var partyNew = this.partiesNext.shift();
+        for (var i = 0; i < partyNew.agents.length; i++)
+        {
+            partyNew.agents[i].ticksSinceSpawn = 0;
+        }
+        this.parties[1] = partyNew;
+        this.entitiesToSpawn.push(partyNew);
+ 
+        this.agentsAll = this.parties[0].agents.concat(partyNew.agents);
+        for (var i = 0; i < this.agentsAll.length; i++)
+        {
+            this.agentsAll[i].hasMovedThisTurn = false;
+        }
+ 
+        this.agentCurrentAdvance();
+    }
+ 
+    Encounter.prototype.updateForTimerTick_WinOrLose = function()
+    {
+        for (var p = 0; p < this.parties.length; p++)
+        {
+            var party = this.parties[p];
+            var partyAgents = party.agents;
+ 
+            var areAnyAgentsInPartyAlive = false;
+ 
+            for (var a = 0; a < partyAgents.length; a++)
+            {
+                var agent = partyAgents[a];
+ 
+                // wait for the fade-out to finish
+                if (agent.hasFadedOut() == false)
+                {
+                    areAnyAgentsInPartyAlive = true;
+                    break;
+                }
+            }
+ 
+            if (areAnyAgentsInPartyAlive == false)
+            {
+                if (p == 0)
+                {
+                    Globals.Instance.endWithMessage("You lose!", "lose", null, null, true);
+                }
+                else if (this.partiesNext.length > 0)
+                {
+                    // wait until the last attacker has finished and walked home
+                    if (this.agentCurrent == null)
+                    {
+                        this.partyEnemyReplace();
+                    }
+                }
+                else
+                {
+                    Globals.Instance.endWithMessage("You win!", "win", winLinkUrl, winLinkText, false);
+                }
+            }
+        }
+    }
+ 
+    // drawable
+ 
+    Encounter.prototype.drawToDisplay = function(display)
+    {
+        var encounter = this;
+        display.clear();
+ 
+        var encounterDefn = encounter.defn();
+        var panes = encounterDefn.panes;
+ 
+        for (var p = 0; p < panes.length; p++)
+        {
+            var pane = panes[p];
+            pane.drawToDisplay(display);
+        }
+ 
+        // grass over the whole field, down to the top of the status panes
+        var fieldSize = new Coords(display.sizeInPixels.x, panes["Status_Other"].pos.y);
+        var background = Globals.Instance.universe.imageLibrary.images["grass"];
+        if (background.isLoaded())
+        {
+            display.drawImageCovering
+            (
+                background.systemImage,
+                Coords.Instances.Zeroes,
+                fieldSize
+            );
+        }
+        display.drawRectangle(Coords.Instances.Zeroes, fieldSize, null, display.colorFore);
+ 
+        // dark box behind the player party
+        var paneForPlayers = panes["Field_Player"];
+        display.drawRectangle
+        (
+            paneForPlayers.pos.clone().add(new Coords(0, 10)),
+            new Coords(paneForPlayers.size.x, paneForPlayers.size.y - 20),
+            "rgba(0, 0, 0, 0.5)",
+            null
+        );
+ 
+        var entities = encounter.entities;
+        for (var i = 0; i < entities.length; i++)
+        {
+            var entity = entities[i];
+ 
+            if (entity.drawToDisplay != null)
+            {
+                entity.drawToDisplay(display);
+            }
+        }
+
+        // selection arrows go on top of everything
+        for (var i = 0; i < encounter.agentsAll.length; i++)
+        {
+            encounter.agentsAll[i].drawIndicatorsToDisplay(display);
+        }
+    }
+ 
+}
+ 
+function EncounterDefn(name, panes)
+{
+    this.name = name;
+    this.panes = panes;
+ 
+    this.panes.addLookups("name");
+}
+ 
+ 
+function Globals()
+{}
+{
+    Globals.Instance = new Globals();
+ 
+    Globals.prototype.handleEventTimerTick = function()
+    {
+        this.universe.updateForTimerTick();
+        this.inputHelper.updateForTimerTick();
+    }
+ 
+    Globals.prototype.endWithMessage = function(text, soundName, linkUrl, linkText, canRetry)
+    {
+        clearInterval(this.timer);
+ 
+        if (this.hasEnded == true)
+        {
+            return;
+        }
+        this.hasEnded = true;
+        this.soundHelper.stopMusic();
+        this.soundHelper.play(soundName);
+
+        var overlay = document.createElement("div");
+        overlay.style.position = "fixed";
+        overlay.style.left = "0";
+        overlay.style.top = "0";
+        overlay.style.width = "100%";
+        overlay.style.height = "100%";
+        overlay.style.display = "flex";
+        overlay.style.flexDirection = "column";
+        overlay.style.alignItems = "center";
+        overlay.style.justifyContent = "center";
+        overlay.style.background = "rgba(0, 0, 0, 0.6)";
+        overlay.style.color = "White";
+        overlay.style.fontFamily = "sans-serif";
+        overlay.style.fontSize = "48px";
+ 
+        var message = document.createElement("div");
+        message.textContent = text;
+        overlay.appendChild(message);
+ 
+        if (linkUrl != null)
+        {
+            var link = document.createElement("a");
+            link.href = linkUrl;
+            link.textContent = linkText;
+            link.style.color = "Yellow";
+            link.style.fontSize = "28px";
+            link.style.marginTop = "16px";
+            overlay.appendChild(link);
+        }
+ 
+        if (canRetry == true)
+        {
+            var button = document.createElement("button");
+            button.textContent = "Retry (R)";
+            button.style.marginTop = "20px";
+            button.style.padding = "8px 28px";
+            button.style.fontSize = "28px";
+            button.style.cursor = "pointer";
+            button.onclick = function() { Globals.Instance.restart(); };
+            overlay.appendChild(button);
+
+            this.handlerRetryKey = function(e)
+            {
+                if (e.key == "r" || e.key == "R")
+                {
+                    Globals.Instance.restart();
+                }
+            };
+            window.addEventListener("keydown", this.handlerRetryKey);
+        }
+
+        this.overlay = overlay;
+        document.body.appendChild(overlay);
+    }
+ 
+    Globals.prototype.restart = function()
+    {
+        // tear down the old run completely...
+        clearInterval(this.timer);
+        if (this.handlerRetryKey != null)
+        {
+            window.removeEventListener("keydown", this.handlerRetryKey);
+            this.handlerRetryKey = null;
+        }
+        if (this.overlay != null)
+        {
+            this.overlay.parentNode.removeChild(this.overlay);
+            this.overlay = null;
+        }
+        this.soundHelper.stopAll();
+        this.display.dispose();
+
+        // ...and build a brand new one (new universe, new sounds, new music)
+        main();
+        this.soundHelper.startMusic(); // the click / key press counts as a user gesture
+    }
+
+    Globals.prototype.initialize = function
+    (
+        millisecondsPerTimerTick,
+        display,
+        universe,
+        soundHelper
+    )
+    {
+        this.soundHelper = soundHelper;
+        this.hasEnded = false;
+ 
+        this.display = display;
+        this.display.initialize();
+ 
+        this.universe = universe;
+        this.universe.initialize();
+ 
+        this.inputHelper = new InputHelper();
+        this.inputHelper.initialize();
+ 
+        this.timer = setInterval
+        (
+            this.handleEventTimerTick.bind(this),
+            millisecondsPerTimerTick
+        );
+    }
+}
+ 
+function Image(name, sourcePath, fallbackText)
+{
+    this.name = name;
+    this.sourcePath = sourcePath;
+    this.fallbackText = fallbackText;
+ 
+    this.systemImage = document.createElement("img");
+    this.systemImage.src = this.sourcePath;
+}
+{
+    Image.prototype.isLoaded = function()
+    {
+        return (this.systemImage.complete && this.systemImage.naturalWidth > 0);
+    }
+}
+ 
+function ImageLibrary(images)
+{
+    this.images = images;
+    this.images.addLookups("name");
+}
+ 
+function InputHelper()
+{}
+{
+    InputHelper.prototype.initialize = function()
+    {
+        document.body.onkeydown = this.handleEventKeyDown.bind(this);
+        document.body.onkeyup = this.handleEventKeyUp.bind(this);
+    }
+ 
+    InputHelper.prototype.updateForTimerTick = function()
+    {
+        this.keyPressed = null;
+    }
+ 
+    // events
+ 
+    InputHelper.prototype.isBackKey = function()
+    {
+        return (this.keyPressed == "Backspace" || this.keyPressed == "Shift");
+    }
+
+    InputHelper.prototype.consumeKey = function()
+    {
+        // stops later entities this tick from reacting to the same key
+        this.keyPressed = null;
+    }
+
+    InputHelper.prototype.handleEventKeyDown = function(e)
+    {
+        if (e.key == "Backspace")
+        {
+            e.preventDefault(); // stop backspace navigating back
+        }
+        var key = e.key;
+        if (key.length == 1 && e.ctrlKey == false && e.metaKey == false && e.altKey == false)
+        {
+            var wasdKeys = { "w": "ArrowUp", "a": "ArrowLeft", "s": "ArrowDown", "d": "ArrowRight" };
+            var keyMapped = wasdKeys[key.toLowerCase()];
+            if (keyMapped != null)
+            {
+                key = keyMapped;
+            }
+        }
+        this.keyPressed = key;
+        Globals.Instance.soundHelper.startMusic(); // browsers need a key press first
+    }
+ 
+    InputHelper.prototype.handleEventKeyUp = function(e)
+    {
+        // todo 
+    }
+}
+ 
+function IntelligenceHuman()
+{}
+{
+    IntelligenceHuman.prototype.decideAction = function(action)
+    {
+        var encounter = Globals.Instance.universe.encounter;
+        var agent = encounter.agentCurrent;
+        var inputHelper = Globals.Instance.inputHelper;
+        var keyPressed = inputHelper.keyPressed;
+ 
+        var actionDefn = action.defn(agent);
+        var targetMode = (actionDefn == null ? null : actionDefn.targetMode);
+        var isAllyMode = (targetMode != null);
+ 
+        // who can be picked in a given party
+        var candidatesInParty = function(party)
+        {
+            if (targetMode == "AllyDead")
+            {
+                return party.agents.filter(function(a) { return a.isAlive() == false; });
+            }
+            else if (targetMode == "AllyOther")
+            {
+                return party.agentsAlive().filter(function(a) { return a != agent; });
+            }
+            else
+            {
+                return party.agentsAlive();
+            }
+        }
+ 
+        // everyone who can be picked right now
+        var candidates = function()
+        {
+            if (isAllyMode)
+            {
+                return candidatesInParty(agent.party);
+            }
+            // free targeting: anyone still standing, on either side
+            var all = [];
+            for (var p = 0; p < encounter.parties.length; p++)
+            {
+                all = all.concat(encounter.parties[p].agentsAlive());
+            }
+            return all;
+        }
+
+        var centerOf = function(a)
+        {
+            var size = a.defn().sizeInPixels;
+            return new Coords(a.pos.x + size.x / 2, a.pos.y + size.y / 2);
+        }
+
+        // move the cursor to whoever is actually next to it on screen
+        var pickInDirection = function(from, dx, dy)
+        {
+            var fromCenter = centerOf(from);
+            var others = candidates().filter(function(a) { return a != from; });
+            var best = null;
+            var bestScore = Infinity;
+
+            for (var i = 0; i < others.length; i++)
+            {
+                var d = centerOf(others[i]).subtract(fromCenter);
+                var along = d.x * dx + d.y * dy;
+                var across = Math.abs(d.x * dy - d.y * dx);
+                if (along > 0 && across <= along) // within a 45 degree cone
+                {
+                    var score = along + 2 * across;
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        best = others[i];
+                    }
+                }
+            }
+
+            if (best != null)
+            {
+                return best;
+            }
+
+            // nothing that way: wrap around to the far side, lined up as well as possible
+            var wrapOptions = [];
+            var farthest = 0;
+            for (var i = 0; i < others.length; i++)
+            {
+                var d = centerOf(others[i]).subtract(fromCenter);
+                var far = -(d.x * dx + d.y * dy);
+                var across = Math.abs(d.x * dy - d.y * dx);
+                if (far > 0 && across <= far)
+                {
+                    wrapOptions.push({ agent: others[i], far: far, across: across });
+                    farthest = Math.max(farthest, far);
+                }
+            }
+            bestScore = Infinity;
+            for (var i = 0; i < wrapOptions.length; i++)
+            {
+                var option = wrapOptions[i];
+                var score = 2 * option.across + (farthest - option.far);
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = option.agent;
+                }
+            }
+
+            return (best == null ? from : best);
+        }
+
+        // cancel targeting, reopen the menu
+        var cancel = function()
+        {
+            inputHelper.consumeKey();
+            var menuToReopen = action.menuLocked;
+            if (menuToReopen != null)
+            {
+                menuToReopen.isLocked = false;
+            }
+            action.menuLocked = null;
+            action.target_Set(null);
+            action.parameters["EmptyForPosToReturnTo"] = null;
+            action.defnName = null;
+            action.status = ActionStatus.Instances.AwaitingActionDefn;
+        }
+ 
+        var target = action.target();
+        if (target == null)
+        {
+            var partyToStartWith = (isAllyMode ? agent.party : encounter.parties[1]);
+            target = candidatesInParty(partyToStartWith)[0];
+            if (target == null)
+            {
+                // nobody valid to target (e.g. nobody has fallen), so back to the menu
+                cancel();
+                return;
+            }
+            action.target_Set(target);
+            action.parameters["EmptyForPosToReturnTo"] = new Empty(agent.pos.clone());
+        }
+ 
+        if (inputHelper.isBackKey())
+        {
+            cancel();
+        }
+        else if (keyPressed == "Enter")
+        {
+            Globals.Instance.soundHelper.play("select");
+            action.status = ActionStatus.Instances.Running;
+        }
+        else
+        {
+            var dx = 0;
+            var dy = 0;
+            if (keyPressed == "ArrowUp") { dy = -1; }
+            else if (keyPressed == "ArrowDown") { dy = 1; }
+            else if (keyPressed == "ArrowLeft") { dx = -1; }
+            else if (keyPressed == "ArrowRight") { dx = 1; }
+
+            if (dx != 0 || dy != 0)
+            {
+                var targetNew = pickInDirection(target, dx, dy);
+                if (targetNew != target)
+                {
+                    Globals.Instance.soundHelper.play("scroll");
+                    target = targetNew;
+                }
+            }
+
+            action.target_Set(target);
+        }
+    }
+}
+ 
+function IntelligenceMachine()
+{}
+{
+    IntelligenceMachine.prototype.decideActionDefn = function(action, agent)
+    {
+        var actionDefns = agent.defn().actionDefns;
+        var actionDefn = actionDefns[Math.floor(Math.random() * actionDefns.length)];
+ 
+        action.defnName = actionDefn.name;
+        action.status =
+            actionDefn.requiresTarget
+            ? ActionStatus.Instances.AwaitingTarget
+            : ActionStatus.Instances.Complete;
+    }
+ 
+    IntelligenceMachine.prototype.decideAction = function(action)
+    {
+        var encounter = Globals.Instance.universe.encounter;
+        var agent = encounter.agentCurrent;
+ 
+        var partiesOther = encounter.parties.filter(function(p) { return p != agent.party; });
+        var targets = partiesOther[0].agentsAlive();
+        var target = targets[Math.floor(Math.random() * targets.length)];
+ 
+        action.target_Set(target);
+        action.parameters["EmptyForPosToReturnTo"] = new Empty(agent.pos.clone());
+        action.status = ActionStatus.Instances.Running;
+    }
+}
+ 
+function Menu
+(
+    text, 
+    pos, 
+    spacing, 
+    menuable,
+    updateEncounter, 
+    children, 
+    indexOfChildSelected
+)
+{
+    this.text = text;
+    this.pos = pos;
+    this.spacing = spacing;
+    this.menuable = menuable;
+    this.updateEncounter = updateEncounter;
+    this.children = children;
+    this.indexOfChildSelected = indexOfChildSelected;
+
+    this.parent = null;
+    this.isDisabled = null; // optional function; true greys the item out and blocks it
+}
+{
+    Menu.menuablesToMenus = function(menuables, bindingPathsForMenuText, updateEncounter)
+    {
+        var returnValues = [];
+ 
+        for (var i = 0; i < menuables.length; i++)
+        {
+            var menuable = menuables[i];
+ 
+            var menuableAsMenu;
+ 
+            if (menuable.toMenu != null)
+            {
+                menuableAsMenu = menuable.toMenu();
+            }
+            else
+            {
+                var menuText = "";
+                for (var f = 0; f < bindingPathsForMenuText.length; f++)
+                {
+                    var bindingPathForMenuText = bindingPathsForMenuText[f];
+                    var bindingPathElements = bindingPathForMenuText.split(".");
+     
+                    var valueCurrent = menuable;
+                    for (var g = 0; g < bindingPathElements.length; g++)
+                    {
+                        var bindingPathElement = bindingPathElements[g];
+     
+                        if (bindingPathElement.indexOf("()") == -1)
+                        {
+                            valueCurrent = valueCurrent[bindingPathElement];
+                        }
+                        else
+                        {
+                            bindingPathElement = bindingPathElement.substr(0, bindingPathElement.length - "()".length);
+                            var method = valueCurrent[bindingPathElement];
+                            valueCurrent = method.call(valueCurrent);
+                        }
+                    }
+     
+                    menuText += valueCurrent;
+                }
+     
+                menuableAsMenu = new Menu
+                (
+                    menuText,
+                    new Coords(0, 0), // pos
+                    new Coords(0, 8), // spacing
+                    menuable, // menuable
+                    updateEncounter,
+                    null // children
+                );
+            }
+             
+             
+ 
+            if (menuable.isAvailable != null)
+            {
+                menuableAsMenu.availabilityDefn = menuable;
+                menuableAsMenu.isDisabled = function()
+                {
+                    var agent = Globals.Instance.universe.encounter.agentCurrent;
+                    if (agent == null)
+                    {
+                        return false;
+                    }
+                    return (this.availabilityDefn.isAvailable(agent) == false);
+                }
+            }
+ 
+            returnValues.push(menuableAsMenu);
+        }
+ 
+        return returnValues;
+    }
+ 
+    // instance methods
+ 
+    Menu.prototype.childSelected = function()
+    {
+        return (this.indexOfChildSelected == null ? null : this.children[this.indexOfChildSelected]);
+    }
+ 
+    Menu.prototype.indexOfChildSelectedAdd = function(valueToAdd)
+    {
+        Globals.Instance.soundHelper.play("scroll");
+        this.indexOfChildSelected += valueToAdd;
+        if (this.indexOfChildSelected < 0)
+        {
+            this.indexOfChildSelected = this.children.length - 1;
+        }
+        else if (this.indexOfChildSelected >= this.children.length)
+        {
+            this.indexOfChildSelected = 0;
+        }
+    }
+ 
+    Menu.prototype.updateEncounterForTimerTick = function(encounter)
+    {
+        if (this.isLocked == true)
+        {
+            return;
+        }
+ 
+        var inputHelper = Globals.Instance.inputHelper;
+        var keyPressed = inputHelper.keyPressed;
+ 
+        if (inputHelper.isBackKey() || keyPressed == "ArrowLeft")
+        {
+            // back to the parent menu
+            if (this.parent != null)
+            {
+                inputHelper.consumeKey();
+                var parent = this.parent;
+                parent.isLocked = false;
+                encounter.entitiesToRemove.push(this);
+                encounter.entitiesToSpawn.push(parent);
+            }
+        }
+        else if (keyPressed == "Enter" || keyPressed == "ArrowRight") 
+        {
+            var encounter = Globals.Instance.universe.encounter;
+            var childSelected = this.childSelected();
+            if (childSelected == null)
+            {
+                return; // empty menu, e.g. no items
+            }
+ 
+            if (childSelected.isDisabled != null && childSelected.isDisabled())
+            {
+                return; // greyed out, e.g. not enough energy
+            }
+ 
+            Globals.Instance.soundHelper.play("select");
+            this.isLocked = true;
+ 
+            if (childSelected.children == null)
+            {
+                var action = encounter.agentCurrent.action;
+                if (action != null)
+                {
+                    action.menuLocked = this;
+                }
+                childSelected.updateEncounter(encounter);
+            }
+            else
+            {
+                childSelected.parent = this;
+                encounter.entitiesToRemove.push(this);
+                encounter.entitiesToSpawn.push(childSelected);
+            }
+        }
+        else if (keyPressed == "ArrowDown")
+        {
+            this.indexOfChildSelectedAdd(1);
+        }
+        else if (keyPressed == "ArrowUp")
+        {
+            this.indexOfChildSelectedAdd(-1);
+        }
+    }
+ 
+    // drawable
+ 
+    Menu.prototype.drawToDisplay = function(display)
+    {
+        var menu = this;
+        var pos = menu.pos;
+        var spacing = menu.spacing;
+ 
+        var arrowSize = new Coords(6, 6);
+        var drawPos = pos.clone().add
+        (
+            new Coords(arrowSize.x + 4, spacing.y / 2)
+        );
+ 
+        var children = menu.children;
+ 
+        if (children != null)
+        {
+            for (var i = 0; i < children.length; i++)
+            {
+                var child = children[i];
+                var displayText = child.text;
+                var isChildDisabled = (child.isDisabled != null && child.isDisabled());
+                display.drawText
+                (
+                    displayText,
+                    drawPos,
+                    (isChildDisabled ? "DimGray" : null)
+                );
+ 
+                if (i == menu.indexOfChildSelected)
+                {
+                    display.drawArrow
+                    (
+                        new Coords(drawPos.x - arrowSize.x - 2, drawPos.y + 2),
+                        arrowSize,
+                        display.colorFore,
+                        "right"
+                    );
+                }
+ 
+                drawPos.add(spacing);
+ 
+            } // end for
+        }
+    }
+ 
+}
+ 
+function Message(text, pos)
+{
+    this.text = text;
+    this.pos = pos;
+ 
+    this.ticksToLive = 100;
+}
+ 
+function NumberHelper()
+{
+    // static class
+}
+{
+    NumberHelper.trimValueToMinAndMax = function(value, min, max)
+    {
+        if (value < min)
+        {
+            value = min;
+        }
+        else if (value > max)
+        {
+            value = max;
+        }
+ 
+        return value;
+    }
+}
+ 
+function Pane(name, pos, size)
+{
+    this.name = name;
+    this.pos = pos;
+    this.size = size;
+}
+{
+    // drawable
+ 
+    Pane.prototype.drawToDisplay = function(display)
+    {
+        display.drawRectangle
+        (
+            this.pos, this.size, 
+            display.colorBack, 
+            display.colorFore
+        );
+    }
+}
+ 
+function Party(name, intelligence, agents)
+{
+    this.name = name;
+    this.intelligence = intelligence;
+    this.agents = agents;
+ 
+    this.agentIndexCurrent = null;
+ 
+    for (var i = 0; i < this.agents.length; i++)
+    {
+        var agent = this.agents[i];
+        agent.party = this;
+    }
+}
+{
+    Party.prototype.agentsAlive = function()
+    {
+        return this.agents.filter(function(agent) { return agent.isAlive(); });
+    }
+ 
+    Party.prototype.agentCurrent = function()
+    {
+        return (this.agentIndexCurrent == null ? null : this.agents[this.agentIndexCurrent]);
+    }
+ 
+    Party.prototype.agentCurrentAdvance = function()
+    {
+        if (this.agentIndexCurrent == null)
+        {
+            this.agentIndexCurrent = 0;
+        }
+        else
+        {
+            this.agentIndexCurrent++;
+            if (this.agentIndexCurrent >= this.agents.length)
+            {
+                this.agentIndexCurrent = 0;
+            }
+        }
+    }
+ 
+    Party.prototype.initializeForEncounter = function(encounter)
+    {
+        for (var i = 0; i < this.agents.length; i++)
+        {
+            var agent = this.agents[i];
+            encounter.entitiesToSpawn.push(agent);
+        }
+    }
+ 
+    Party.prototype.updateEncounterForTimerTick = function(encounter)
+    {
+        // do nothing
+    }
+ 
+    // drawable
+ 
+    Party.prototype.drawToDisplay = function(display)
+    {
+        var panes = Globals.Instance.universe.encounter.defn().panes;
+ 
+        var paneForStatus = panes["Status_" + this.name];
+ 
+        var menuForParty = new Menu
+        (
+            "Party",
+            paneForStatus.pos,
+            new Coords(0, 8), // spacing
+            null, // updateEncounter
+            this, // menuable
+            Menu.menuablesToMenus
+            (
+                this.agents,
+                [ "name", "integrity", "defn().integrityMax" ], // bindingPathsForDisplayText
+                null // updateEncounter
+            )
+        )
+ 
+        menuForParty.drawToDisplay(display);
+    }
+}
+ 
+function Range(min, max)
+{
+    this.min = min;
+    this.max = max;
+    this.size = this.max - this.min;
+}
+{
+    Range.prototype.randomNumberInRange = function()
+    {
+        return this.min + Math.floor(Math.random() * (this.size + 1));
+    }
+}
+ 
+function SoundHelper(directory, effectNames, musicName)
+{
+    this.sounds = [];
+ 
+    for (var i = 0; i < effectNames.length; i++)
+    {
+        var name = effectNames[i];
+        this.sounds[name] = this.audioBuild(directory, name);
+    }
+ 
+    this.music = this.audioBuild(directory, musicName);
+    this.music.loop = true;
+    this.music.volume = 0.5;
+    this.musicStopped = false;
+}
+{
+    SoundHelper.prototype.audioBuild = function(directory, name)
+    {
+        // tries each format in turn until one loads
+        var formats = [ [ "wav", "audio/wav" ], [ "mp3", "audio/mpeg" ], [ "ogg", "audio/ogg" ] ];
+ 
+        var audio = document.createElement("audio");
+        audio.preload = "auto";
+        for (var f = 0; f < formats.length; f++)
+        {
+            var source = document.createElement("source");
+            source.src = directory + name + "." + formats[f][0];
+            source.type = formats[f][1];
+            audio.appendChild(source);
+        }
+ 
+        return audio;
+    }
+ 
+    SoundHelper.prototype.play = function(name)
+    {
+        try
+        {
+            var audio = this.sounds[name];
+            audio.currentTime = 0;
+            audio.play().catch(function() {}); // missing file or blocked
+        }
+        catch (err)
+        {
+            // sounds are optional
+        }
+    }
+ 
+    SoundHelper.prototype.stopMusic = function()
+    {
+        this.musicStopped = true; // stops later key presses from restarting it
+        try
+        {
+            this.music.pause();
+            this.music.currentTime = 0;
+        }
+        catch (err)
+        {
+            // music is optional
+        }
+    }
+
+    SoundHelper.prototype.stopAll = function()
+    {
+        this.stopMusic();
+        for (var name in this.sounds)
+        {
+            try
+            {
+                this.sounds[name].pause();
+                this.sounds[name].currentTime = 0;
+            }
+            catch (err)
+            {
+                // sounds are optional
+            }
+        }
+    }
+
+    SoundHelper.prototype.startMusic = function()
+    {
+        try
+        {
+            if (this.musicStopped != true && this.music.paused)
+            {
+                this.music.play().catch(function() {});
+            }
+        }
+        catch (err)
+        {
+            // music is optional
+        }
+    }
+}
+ 
+function SpellDefn(name, apply, energyCost)
+{
+    this.name = name;
+    this.apply = apply;
+    this.energyCost = (energyCost == null ? 0 : energyCost);
+}
+{
+    SpellDefn.prototype.isAvailable = function(agent)
+    {
+        return (agent.energy >= this.energyCost);
+    }
+}
+ 
+function Universe
+(
+    name, 
+    imageLibrary,
+    actionDefns,
+    agentDefns, 
+    effectDefns, 
+    encounterDefns, 
+    encounter
+)
+{
+    this.name = name;
+    this.imageLibrary = imageLibrary;
+    this.actionDefns = actionDefns;
+    this.agentDefns = agentDefns;
+    this.effectDefns = effectDefns;
+    this.encounterDefns = encounterDefns;
+    this.encounter = encounter;
+ 
+    this.agentDefns.addLookups("name");
+    this.effectDefns.addLookups("name");
+    this.encounterDefns.addLookups("name");
+}
+{
+    Universe.prototype.initialize = function()
+    {
+        this.encounter.initialize();
+    }
+ 
+    Universe.prototype.updateForTimerTick = function()
+    {
+        this.encounter.updateForTimerTick();
+    }
+}
+ 
+// demo
+ 
+function DemoData()
+{
+    // do nothing
+}
+{
+    DemoData.prototype.universe = function()
+    {
+        var imageDirectory = "../Media/Images/";
+ 
+        var imageLibrary = new ImageLibrary
+        ([
+            new Image("grass", imageDirectory + "grass.webp", ""),
+            new Image("player", imageDirectory + "player.png", "\u2764\uFE0F"),
+            new Image("robes", imageDirectory + "robes.png", "\u2049\uFE0F"),
+            new Image("horse", imageDirectory + "horse.png", "\uD83D\uDC34"),
+            new Image("lovity", imageDirectory + "lovity.png", "\uD83E\uDE77"),
+            new Image("minion1", imageDirectory + "minion1.png", "\uD83D\uDC9B"),
+            new Image("minion2", imageDirectory + "minion2.png", "\uD83D\uDC9B"),
+            new Image("minion3", imageDirectory + "minion3.png", "\uD83D\uDC9B"),
+            new Image("minion4", imageDirectory + "minion4.png", "\uD83D\uDC7F"),
+            new Image("minion5", imageDirectory + "minion5.png", "\uD83D\uDC7F"),
+            new Image("minion6", imageDirectory + "minion6.png", "\uD83D\uDC7F"),
+            new Image("minion7", imageDirectory + "minion7.png", "\uD83D\uDC80"),
+            new Image("minion8", imageDirectory + "minion8.png", "\uD83D\uDC80"),
+            new Image("minion9", imageDirectory + "minion9.png", "\uD83D\uDC80"),
+            new Image("isaac", imageDirectory + "isaac.png", "\uD83C\uDF4E"),
+        ]);
+ 
+        var effectDefns = [];
+ 
+        var actionDefnsCommon = this.universe_2_ActionDefns();
+ 
+        var agentDefns = this.universe_3_AgentDefns(actionDefnsCommon);
+ 
+        var encounterDefns = 
+        [
+            new EncounterDefn
+            (
+                "Default",
+                // panes
+                [
+                    new Pane("Field_Other", new Coords(0, 0), new Coords(184, 150)),
+                    new Pane("Field_Player", new Coords(184, 0), new Coords(116, 150)),
+                    new Pane("Status_Other", new Coords(0, 150), new Coords(100, 75)),
+                    new Pane("Status_Player", new Coords(100, 150), new Coords(125, 75)),
+                    new Pane("Menu_Player", new Coords(225, 150), new Coords(75, 75)),              
+                ]
+            ),
+        ].addLookups("name");
+ 
+        var encounter = this.universe_4_Encounter(encounterDefns, agentDefns);
+ 
+        var universe = new Universe
+        (
+            "Universe0",
+            imageLibrary,
+            actionDefnsCommon,
+            agentDefns, 
+            effectDefns,
+            encounterDefns, 
+            encounter
+        );
+ 
+        return universe;
+ 
+    } // end method
+ 
+    DemoData.prototype.universe_2_ActionDefns = function()
+    {
+        var actionDefnsCommon = 
+        [
+            new ActionDefn
+            (
+                "Attack",
+                true, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    var target = action.target();
+                    var displacementFromAgentToTarget = target.pos.clone().subtract
+                    (
+                        agent.pos
+                    );
+ 
+                    var distanceToTarget = displacementFromAgentToTarget.magnitude();
+ 
+                    var distanceToMovePerTick = 16;
+                 
+                    if (distanceToTarget > distanceToMovePerTick)
+                    {
+                        var displacementToMove = displacementFromAgentToTarget.divideScalar
+                        (
+                            distanceToTarget
+                        ).multiplyScalar
+                        (
+                            distanceToMovePerTick
+                        );
+     
+                        agent.pos.add(displacementToMove);
+                    }
+                    else
+                    {   
+                        var emptyToReturnTo = action.parameters["EmptyForPosToReturnTo"];
+ 
+                        if (target.integrity == null)
+                        {
+                            agent.pos.overwriteWith(emptyToReturnTo.pos);
+                            action.target_Set(null);
+                            action.status = ActionStatus.Instances.Complete;
+                        }
+                        else
+                        {
+                            var damage = agent.defn().damageRanges[agent.turnsTakenThisRound].randomNumberInRange();
+                            agent.damageTarget(target, damage);
+                            action.target_Set(emptyToReturnTo);
+                        }
+                    }
+                },
+                null // toMenu
+            ),
+ 
+            new ActionDefn
+            (
+                "Defend",
+                true, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    // guard an ally until this agent's next turn:
+                    // hits on the ally are split, each taking a quarter (rounded up)
+                    var target = action.target();
+                    if (target instanceof Agent && target != agent && target.isAlive())
+                    {
+                        agent.guarding = target;
+                    }
+                    action.target_Set(null);
+                    action.status = ActionStatus.Instances.Complete;
+                },
+                null, // toMenu
+                "AllyOther" // targetMode
+            ),
+ 
+            new ActionDefn
+            (
+                "Motivate",
+                true, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    // the chosen ally (or the caster) deals double damage for their next 3 turns
+                    var target = action.target();
+                    if (target instanceof Agent && target.isAlive())
+                    {
+                        // a self-cast uses up the current turn, so give it one extra
+                        target.motivatedTurns = 3 + (target == agent ? 1 : 0);
+                        target.numberSpawn("ATK x2", "Orange", false);
+                    }
+                    action.target_Set(null);
+                    action.status = ActionStatus.Instances.Complete;
+                },
+                null, // toMenu
+                "Ally" // targetMode: any living ally, caster included
+            ),
+
+            new ActionDefn
+            (
+                "Resurrect",
+                true, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    // costs half the caster's current integrity (rounded up);
+                    // the fallen ally returns at half of their max integrity (rounded up)
+                    var target = action.target();
+                    var cost = Math.ceil(agent.integrity / 2);
+                    if (target instanceof Agent && target.isAlive() == false && cost < agent.integrity)
+                    {
+                        agent.damageApply(cost, false);
+ 
+                        target.integrity = Math.ceil(target.defn().integrityMax / 2);
+                        target.ticksSinceDeath = 0;
+                        target.blinkTicksRemaining = Agent.ticksToBlink;
+                        target.guarding = null;
+                        target.turnsTakenThisRound = 0;
+                        target.hasMovedThisTurn = true; // rejoins next round
+                        target.numberSpawn("+" + target.integrity, "LightGreen", false);
+                    }
+                    action.target_Set(null);
+                    action.status = ActionStatus.Instances.Complete;
+                },
+                null, // toMenu
+                "AllyDead" // targetMode
+            ),
+ 
+            new ActionDefn
+            (
+                "Magic",
+                true, // requiresTarget
+                // updateEncounter
+                function(encounter, agent, action)
+                {
+                    action.status = ActionStatus.Instances.Complete;
+                },
+                // toMenu
+                function()
+                {
+                    var universe = Globals.Instance.universe;
+                    var encounter = universe.encounter;
+                    var panes = encounter.defn().panes;
+                    var agent = encounter.agentCurrent;
+                    var spellDefns = agent.defn().spellDefns;
+ 
+                    var returnMenu = new Menu
+                    (
+                        "Magic",
+                        panes["Menu_Player"].pos, // pos
+                        new Coords(0, 8), // spacing
+                        null, // menuable
+                        null, // updateEncounter
+                        Menu.menuablesToMenus
+                        (
+                            spellDefns,
+                            [ "name" ], // bindingPathsForMenuText
+                            function (encounter) 
+                            { 
+                                var spellDefn = this.menuable;
+                                var agent = encounter.agentCurrent;
+                                var action = agent.action;
+                                action.parameters["SpellDefn"] = spellDefn;
+                                action.defnName = "Spell";
+                                action.status = ActionStatus.Instances.AwaitingTarget;
+                            }
+                        ),
+                        0 // indexOfChildSelected
+                    );
+ 
+                    return returnMenu;
+                }
+            ),
+ 
+            new ActionDefn
+            (
+                "Spell",
+                true, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    var target = action.target();
+                    var displacementFromAgentToTarget = target.pos.clone().subtract
+                    (
+                        agent.pos
+                    );
+ 
+                    var distanceToTarget = displacementFromAgentToTarget.magnitude();
+ 
+                    var distanceToMovePerTick = 16;
+                     
+                    if (distanceToTarget > distanceToMovePerTick)
+                    {
+                        var displacementToMove = displacementFromAgentToTarget.divideScalar
+                        (
+                            distanceToTarget
+                        ).multiplyScalar
+                        (
+                            distanceToMovePerTick
+                        );
+     
+                        agent.pos.add(displacementToMove);
+                    }
+                    else
+                    {   
+                        var emptyToReturnTo = action.parameters["EmptyForPosToReturnTo"];                   
+     
+                        if (target.integrity == null)
+                        {
+                            agent.pos.overwriteWith(emptyToReturnTo.pos);
+                            action.target_Set(null);
+                            action.status = ActionStatus.Instances.Complete;
+                        }
+                        else
+                        {
+                            var spellDefn = action.parameters["SpellDefn"];
+                            if (agent.energy < spellDefn.energyCost)
+                            {
+                                // not enough energy: the spell fizzles and the turn is spent
+                                agent.pos.overwriteWith(emptyToReturnTo.pos);
+                                action.target_Set(null);
+                                action.status = ActionStatus.Instances.Complete;
+                                return;
+                            }
+                            spellDefn.apply
+                            (
+                                agent,
+                                target
+                            );
+                            action.target_Set(emptyToReturnTo);
+                        }
+                    }
+                },
+                null // toMenu
+            ),      
+ 
+            new ActionDefn
+            (
+                "Wait",
+                false, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    encounter.agentCurrentAdvance();
+                },
+                null // toMenu
+            ),
+ 
+            new ActionDefn
+            (
+                "Run",
+                false, // requiresTarget
+                function(encounter, agent, action)
+                {
+                    // todo
+                    action.status = ActionStatus.Instances.Complete;
+                },
+                null // toMenu  
+            ),
+        ];  
+ 
+        actionDefnsCommon.addLookups("name");
+ 
+        // greyed out in the menu when they can't be used
+        actionDefnsCommon["Magic"].isAvailable = function(agent)
+        {
+            var spellDefns = agent.defn().spellDefns;
+            return (spellDefns != null && spellDefns.some(function(s) { return s.isAvailable(agent); }));
+        }
+        actionDefnsCommon["Resurrect"].isAvailable = function(agent)
+        {
+            var someoneHasFallen = agent.party.agents.some(function(a) { return a.isAlive() == false; });
+            return (someoneHasFallen && agent.integrity > 1);
+        }
+ 
+        return actionDefnsCommon;
+    }
+ 
+    DemoData.prototype.universe_3_AgentDefns = function(actionDefnsCommon)
+    {
+        var agentSizeInPixelsStandard = new Coords(48, 48);
+ 
+        var agentDefns = 
+        [
+            new AgentDefn
+            (
+                "Mage", 
+                agentSizeInPixelsStandard,
+                35, //integrityMax,
+                100, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(4, 6) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                    actionDefnsCommon["Magic"],
+                    actionDefnsCommon["Motivate"],
+                    actionDefnsCommon["Wait"],
+                ],
+                // spellDefns
+                [
+                    new SpellDefn
+                    (
+                        "Fire",
+                        // apply 
+                        function(agent, target) 
+                        { 
+                            agent.energy -= 10;
+                            agent.damageTarget(target, 20);
+                        },
+                        10 // energyCost 
+                    ),
+                ]
+            ),      
+     
+            new AgentDefn
+            (
+                "Priest", 
+                agentSizeInPixelsStandard,
+                35, //integrityMax,
+                100, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(4, 6) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                    actionDefnsCommon["Magic"],
+                    actionDefnsCommon["Motivate"],
+                    actionDefnsCommon["Resurrect"],
+                    actionDefnsCommon["Wait"],
+                ],
+                // spellDefns
+                [
+                    new SpellDefn
+                    (
+                        "Heal",
+                        // apply 
+                        function(agent, target) 
+                        { 
+                            agent.energy -= 10;
+                            var integrityToHeal = 20;
+                            target.heal(integrityToHeal);
+                        },
+                        10 // energyCost 
+                    ),
+                ]
+            ),
+ 
+            new AgentDefn
+            (
+                "Warrior", 
+                agentSizeInPixelsStandard,
+                60, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(20, 27) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                    actionDefnsCommon["Defend"],
+                    actionDefnsCommon["Wait"],
+                ],
+                null // spellDefns
+            ),
+ 
+            new AgentDefn
+            (
+                "Horse", 
+                agentSizeInPixelsStandard,
+                100, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(12, 34) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                    actionDefnsCommon["Defend"],
+                    actionDefnsCommon["Resurrect"],
+                    actionDefnsCommon["Wait"],
+                ],
+                null // spellDefns
+            ),
+ 
+            new AgentDefn
+            (
+                "Angered Soul", 
+                new Coords(40, 40), // size
+                55, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(6, 9) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                ],
+                null // spellDefns
+            ),  
+ 
+            new AgentDefn
+            (
+                "Raging Soul", 
+                new Coords(44, 44), // size
+                85, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(8, 12) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                ],
+                null // spellDefns
+            ),
+
+            new AgentDefn
+            (
+                "angy >:(", 
+                new Coords(48, 48), // size
+                115, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                [ new Range(9, 13) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                ],
+                null // spellDefns
+            ),
+ 
+            new AgentDefn
+            (
+                "Isaac", 
+                new Coords(96, 96), // size
+                160, //integrityMax,
+                0, //energyMax,
+                new Range(1, 10), // initiativeRange
+                // two turns in a row each round
+                [ new Range(8, 11), new Range(13, 17) ], // damageRanges
+                //actionDefns
+                [
+                    actionDefnsCommon["Attack"],
+                ],
+                null // spellDefns
+            ),  
+        ];
+ 
+        agentDefns.addLookups("name");
+ 
+        return agentDefns;
+    }
+ 
+    DemoData.prototype.universe_4_Encounter = function(encounterDefns, agentDefns)
+    {
+        var encounter = new Encounter
+        (
+            encounterDefns["Default"].name,
+            // parties
+            [
+                new Party
+                (
+                    "Player",
+                    new IntelligenceHuman(),
+                    [
+                        new Agent("You", agentDefns["Warrior"].name, new Coords(190, 20), "player"),
+                        new Agent("???", agentDefns["Mage"].name, new Coords(245, 20), "robes"),
+                        new Agent("Horse", agentDefns["Horse"].name, new Coords(190, 82), "horse"),
+                        new Agent("Lovity", agentDefns["Priest"].name, new Coords(245, 82), "lovity"),
+                    ]
+                ),
+                new Party
+                (
+                    "Other",
+                    new IntelligenceMachine(),
+                    [
+                        new Agent(null, agentDefns["Angered Soul"].name, new Coords(95, 10), "minion1"),
+                        new Agent(null, agentDefns["Angered Soul"].name, new Coords(95, 55), "minion2"),
+                        new Agent(null, agentDefns["Angered Soul"].name, new Coords(95, 100), "minion3"),
+                    ]
+                ),
+            ],
+            // parties that arrive after the previous one is defeated
+            [
+                new Party
+                (
+                    "Other",
+                    new IntelligenceMachine(),
+                    [
+                        new Agent(null, agentDefns["Raging Soul"].name, new Coords(93, 8), "minion4"),
+                        new Agent(null, agentDefns["Raging Soul"].name, new Coords(93, 54), "minion5"),
+                        new Agent(null, agentDefns["Raging Soul"].name, new Coords(93, 100), "minion6"),
+                    ]
+                ),
+                new Party
+                (
+                    "Other",
+                    new IntelligenceMachine(),
+                    [
+                        new Agent(null, agentDefns["angy >:("].name, new Coords(91, 3), "minion7"),
+                        new Agent(null, agentDefns["angy >:("].name, new Coords(91, 51), "minion8"),
+                        new Agent(null, agentDefns["angy >:("].name, new Coords(91, 99), "minion9"),
+                    ]
+                ),
+                new Party
+                (
+                    "Other",
+                    new IntelligenceMachine(),
+                    [
+                        new Agent("Isaac", agentDefns["Isaac"].name, new Coords(67, 27), "isaac"),
+                    ]
+                ),
+            ]
+        );
+ 
+        return encounter;
+    }
+ 
+} // end class DemoData
+ 
+// run
+ 
+main();
+ 
+</script>
+</body>
+</html>
